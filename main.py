@@ -7,7 +7,7 @@ import tempfile
 
 # --- الإعدادات ---
 # ‼️ تأكد من أن هذه الأسماء تطابق ما ستنشئه في Google Cloud
-BUCKET_NAME = "v10-model-storage-hunter" # ‼️ (استخدم هذا الاسم بالضبط في الخطوة 3)
+BUCKET_NAME = "v15-model-storage-hunter" # ‼️ (استخدم هذا الاسم بالضبط في الخطوة 3)
 MODEL_FILE_NAME = "random_forest_eurusd_v15_upgraded_scalper.joblib" # ‼️ (اسم ملفك الضخم)
 
 # متغير عالمي لحفظ النموذج بعد تحميله
@@ -99,3 +99,4 @@ def predict():
 if __name__ == "__main__":
 
     app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+
