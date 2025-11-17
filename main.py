@@ -2,90 +2,99 @@ import os
 import joblib
 import numpy as np
 from flask import Flask, request, jsonify
-from google.cloud import storage
+from google.cloud import storage # ‼️ مكتبة Google Cloud
 import tempfile
 
-# --- 1. الإعدادات (غيّر هذا ليطابق v15) ---
-BUCKET_NAME = "v15-model-storage-hunter" # ‼️ (اسم الخزنة v15)
-MODEL_FILE_NAME = "random_forest_eurusd_v15_upgraded_scalper.joblib" # ‼️ (اسم نموذج v15)
+# --- الإعدادات ---
+# ‼️ تأكد من أن هذه الأسماء تطابق ما ستنشئه في Google Cloud
+BUCKET_NAME = "v15-model-storage-hunter" # ‼️ (استخدم هذا الاسم بالضبط في الخطوة 3)
+MODEL_FILE_NAME = "random_forest_eurusd_v15_upgraded_scalper.joblib" # ‼️ (اسم ملفك الضخم)
 
-# --- 2. قائمة الميزات (للتأكد فقط) ---
-FEATURE_COLUMNS = [
-    'DayOfWeek', 'HourOfDay', 'RSI_m15', 'ATR_m15', 'MACD_m15', 
-    'MACD_signal_m15', 'Momentum_m15_0', 'Momentum_m15_1', 'SMA50_h1', 
-    'Momentum_h1_0', 'SMA50_h4', 'SMA200_h4', 'Dist_from_High_m15', 
-    'Dist_from_Low_m15', 'Dist_from_High_h1', 'Dist_from_Low_h1', 
-    'Dist_from_High_h4', 'Dist_from_Low_h4', 'Volume', 'Volume_h1', 'Volume_h4'
-]
-
+# متغير عالمي لحفظ النموذج بعد تحميله
 model = None
-app = Flask(__name__)
 
-# --- 3. دالة تحميل النموذج (من V10) ---
 def download_model_from_gcs():
+    """
+    يقوم بتحميل ملف النموذج من Google Cloud Storage إلى ملف مؤقت
+    """
     global model
     try:
         storage_client = storage.Client()
         bucket = storage_client.get_bucket(BUCKET_NAME)
         blob = bucket.blob(MODEL_FILE_NAME)
         
+        # إنشاء ملف مؤقت آمن
         with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-            print(f"🔄 [v15] جاري تحميل النموذج {MODEL_FILE_NAME} من GCS...")
+            print(f"🔄 [1/2] جاري تحميل النموذج {MODEL_FILE_NAME} من GCS...")
             blob.download_to_filename(temp_file.name)
-            print("✅ [v15] تم التحميل بنجاح.")
+            print("✅ تم التحميل بنجاح.")
             
-            print(f"🔄 [v15] جاري تحميل النموذج إلى الذاكرة...")
+            print(f"🔄 [2/2] جاري تحميل النموذج إلى الذاكرة...")
             model = joblib.load(temp_file.name)
-            print("✅✅✅ [v15] نجاح! تم تحميل النموذج.")
+            print(f"✅✅✅ نجاح! تم تحميل النموذج ({len(model.estimators_)} شجرة).")
         
+        # حذف الملف المؤقت بعد التحميل
         os.remove(temp_file.name)
         
     except Exception as e:
-        print(f"❌ [v15] خطأ فادح أثناء تحميل النموذج: {e}")
-        model = None
+        print(f"❌ خطأ فادح أثناء تحميل النموذج من GCS: {e}")
+        model = None # التأكد من أن النموذج فارغ في حالة الفشل
 
-# --- 4. التحميل عند بدء التشغيل (Flask) ---
-with app.app_context():
+# ===============================================
+# تهيئة الخادم (Flask)
+# ===============================================
+app = Flask(__name__)
+
+# ---------------------------
+# تحميل النموذج عند بدء تشغيل الخادم
+# ---------------------------
+@app.before_request
+def load_model():
+    global model
     if model is None:
-        print("‼️ [v15] النموذج غير موجود، جاري التحميل...")
+        print("‼️ النموذج غير موجود، جاري التحميل من GCS...")
         download_model_from_gcs()
 
-# --- 5. المسارات (Routes) ---
+# ---------------------------
+# نقطة النهاية (Endpoint) الرئيسية
+# ---------------------------
 @app.route("/")
 def home():
     if model is None:
-        return "<h1>❌ خطأ: فشل تحميل نموذج v15.</h1><p>راجع السجلات.</p>", 500
-    return "<h1>🧠 V15 Random Forest API (Flask)</h1><p>النموذج جاهز للعمل.</p>"
+        return "<h1>❌ خطأ: فشل تحميل النموذج.</h1><p>الرجاء مراجعة سجلات Cloud Run.</p>", 500
+    return f"<h1>🧠 V15 Random Forest API (Cloud Run)</h1><p>تم تحميل النموذج ({len(model.estimators_)} شجرة) وجاهز للعمل.</p>"
 
+# ---------------------------
+# نقطة نهاية التنبؤ (لـ MQL5)
+# ---------------------------
 @app.route('/predict', methods=['POST'])
 def predict():
     global model
     if model is None:
-        print("‼️ فشل التنبؤ: النموذج v15 غير محمل.")
+        print("‼️ فشل التنبؤ: النموذج غير محمل.")
         return jsonify({"error": "Model is not loaded"}), 500
 
     try:
         data = request.json
-        features_list = data.get('features') # (نتوقع قائمة)
-        
-        if not isinstance(features_list, list) or len(features_list) != 21:
-             return jsonify({"error": f"Expected a list of 21 features"}), 400
-        
-        # تحويلها إلى NumPy Array ثم Pandas DataFrame (لأن v10 يتوقع هذا)
+        features_str = data.get('features')
+        if not features_str:
+            return jsonify({"error": "No 'features' key found"}), 400
+            
+        features_list = [float(f) for f in features_str.split(',')]
+        if len(features_list) != 21:
+            return jsonify({"error": f"Expected 21 features, received {len(features_list)}"}), 400
+            
         features_np = np.array(features_list).reshape(1, -1)
-        features_df = pd.DataFrame(features_np, columns=FEATURE_COLUMNS)
-
-        # *** هام جداً: نحن نرسل predict_proba (الاحتمالية) ***
-        prediction_prob = model.predict_proba(features_df)
-        buy_probability = prediction_prob[0][1] # (احتمالية الشراء 0.xx)
+        prediction_prob = model.predict_proba(features_np)
+        buy_probability = prediction_prob[0][1]
         
-        print(f"🟢 [v15 Server] تم استلام الميزات. الاحتمالية = {buy_probability}")
         return jsonify({"prediction": buy_probability})
-
     except Exception as e:
-        print(f"‼️ [v15] خطأ أثناء التنبؤ: {e}")
+        print(f"‼️ خطأ أثناء التنبؤ: {e}")
         return jsonify({"error": str(e)}), 500
 
-# --- 6. التشغيل ---
+# ---------------------------
+# تشغيل الخادم
+# ---------------------------
 if __name__ == "__main__":
     app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
