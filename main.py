@@ -1,102 +1,94 @@
-import os
+import fastapi
+import uvicorn
 import joblib
 import numpy as np
-from flask import Flask, request, jsonify
-from google.cloud import storage # ‼️ مكتبة Google Cloud
+import pandas as pd
+import os
 import tempfile
+from pydantic import BaseModel
+from typing import List
+from google.cloud import storage
 
-# --- الإعدادات ---
-# ‼️ تأكد من أن هذه الأسماء تطابق ما ستنشئه في Google Cloud
-BUCKET_NAME = "v15-model-storage-hunter" # ‼️ (استخدم هذا الاسم بالضبط في الخطوة 3)
-MODEL_FILE_NAME = "random_forest_eurusd_v15_upgraded_scalper.joblib" # ‼️ (اسم ملفك الضخم)
+# --- 1. الإعدادات ---
+# ‼️ تأكد من أن هذه الأسماء تطابق ما لديك في Google Cloud
+BUCKET_NAME = "v15-model-storage-hunter" # ‼️ (الاسم الذي أنشأته لـ Bucket)
+MODEL_FILE_NAME = "random_forest_eurusd_v15_upgraded_scalper.joblib" # ‼️ (اسم ملف النموذج الضخم)
 
-# متغير عالمي لحفظ النموذج بعد تحميله
+# ‼️ تأكد من أن هذه الـ 21 ميزة بالترتيب الصحيح
+FEATURE_COLUMNS = [
+    'DayOfWeek', 'HourOfDay', 'RSI_m15', 'ATR_m15', 'MACD_m15', 
+    'MACD_signal_m15', 'Momentum_m15_0', 'Momentum_m15_1', 'SMA50_h1', 
+    'Momentum_h1_0', 'SMA50_h4', 'SMA200_h4', 'Dist_from_High_m15', 
+    'Dist_from_Low_m15', 'Dist_from_High_h1', 'Dist_from_Low_h1', 
+    'Dist_from_High_h4', 'Dist_from_Low_h4', 'Volume', 'Volume_h1', 'Volume_h4'
+]
+
 model = None
+app = fastapi.FastAPI()
 
-def download_model_from_gcs():
-    """
-    يقوم بتحميل ملف النموذج من Google Cloud Storage إلى ملف مؤقت
-    """
+# --- 2. تحميل النموذج عند بدء التشغيل (FastAPI) ---
+@app.on_event("startup")
+def load_model_on_startup():
     global model
+    if model is not None:
+        print("✅ النموذج محمل مسبقاً.")
+        return
+        
     try:
         storage_client = storage.Client()
         bucket = storage_client.get_bucket(BUCKET_NAME)
         blob = bucket.blob(MODEL_FILE_NAME)
         
-        # إنشاء ملف مؤقت آمن
         with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-            print(f"🔄 [1/2] جاري تحميل النموذج {MODEL_FILE_NAME} من GCS...")
+            print(f"🔄 [1/2] جاري تحميل {MODEL_FILE_NAME} من Google Storage...")
             blob.download_to_filename(temp_file.name)
             print("✅ تم التحميل بنجاح.")
             
             print(f"🔄 [2/2] جاري تحميل النموذج إلى الذاكرة...")
             model = joblib.load(temp_file.name)
-            print(f"✅✅✅ نجاح! تم تحميل النموذج ({len(model.estimators_)} شجرة).")
+            print("✅✅✅ نجاح! تم تحميل نموذج v15 (Random Forest).")
         
-        # حذف الملف المؤقت بعد التحميل
-        os.remove(temp_file.name)
+        os.remove(temp_file.name) # حذف الملف المؤقت
         
     except Exception as e:
-        print(f"❌ خطأ فادح أثناء تحميل النموذج من GCS: {e}")
-        model = None # التأكد من أن النموذج فارغ في حالة الفشل
+        print(f"❌ خطأ فادح: فشل تحميل النموذج من GCS: {e}")
+        model = None
 
-# ===============================================
-# تهيئة الخادم (Flask)
-# ===============================================
-app = Flask(__name__)
+# --- 3. تحديد هيكل البيانات (FastAPI) ---
+class FeaturesInput(BaseModel):
+    features: List[float] # (يتطابق مع الإكسبيرت الذي يرسل قائمة)
 
-# ---------------------------
-# تحميل النموذج عند بدء تشغيل الخادم
-# ---------------------------
-@app.before_request
-def load_model():
-    global model
+# --- 4. نقطة نهاية التنبؤ (FastAPI) ---
+@app.post("/predict")
+async def predict(data: FeaturesInput):
     if model is None:
-        print("‼️ النموذج غير موجود، جاري التحميل من GCS...")
-        download_model_from_gcs()
-
-# ---------------------------
-# نقطة النهاية (Endpoint) الرئيسية
-# ---------------------------
-@app.route("/")
-def home():
-    if model is None:
-        return "<h1>❌ خطأ: فشل تحميل النموذج.</h1><p>الرجاء مراجعة سجلات Cloud Run.</p>", 500
-    return f"<h1>🧠 V10 Random Forest API (Cloud Run)</h1><p>تم تحميل النموذج ({len(model.estimators_)} شجرة) وجاهز للعمل.</p>"
-
-# ---------------------------
-# نقطة نهاية التنبؤ (لـ MQL5)
-# ---------------------------
-@app.route('/predict', methods=['POST'])
-def predict():
-    global model
-    if model is None:
-        print("‼️ فشل التنبؤ: النموذج غير محمل.")
-        return jsonify({"error": "Model is not loaded"}), 500
-
+        print("🔴 خطأ 500: النموذج غير محمل.")
+        raise fastapi.HTTPException(status_code=500, detail="Model is not loaded. Check startup logs.")
+    
     try:
-        data = request.json
-        features_str = data.get('features')
-        if not features_str:
-            return jsonify({"error": "No 'features' key found"}), 400
-            
-        features_list = [float(f) for f in features_str.split(',')]
-        if len(features_list) != 21:
-            return jsonify({"error": f"Expected 21 features, received {len(features_list)}"}), 400
-            
-        features_np = np.array(features_list).reshape(1, -1)
-        prediction_prob = model.predict_proba(features_np)
-        buy_probability = prediction_prob[0][1]
+        features_list = data.features
         
-        return jsonify({"prediction": buy_probability})
+        # تحويلها إلى Pandas DataFrame 
+        features_df = pd.DataFrame([features_list], columns=FEATURE_COLUMNS)
+        
+        # طلب التنبؤ (0 أو 1)
+        prediction = model.predict(features_df)
+        signal = int(prediction[0])
+        
+        print(f"🟢 [v15 Server] تم استلام الميزات. الإشارة = {signal}")
+        
+        # إرسال 0 أو 1 (يتطابق مع الإكسبيرت)
+        return {"prediction": signal}
+        
     except Exception as e:
-        print(f"‼️ خطأ أثناء التنبؤ: {e}")
-        return jsonify({"error": str(e)}), 500
+        error_message = str(e)
+        print(f"🔴 [v15 Server] حدث خطأ أثناء التنبؤ: {error_message}")
+        raise fastapi.HTTPException(status_code=500, detail=error_message)
 
-# ---------------------------
-# تشغيل الخادم
-# ---------------------------
-if __name__ == "__main__":
+@app.get("/")
+def root():
+    if model is None:
+        return {"message": "❌ خادم v15: فشل تحميل النموذج. راجع السجلات."}
+    return {"message": "🧠 خادم v15 (Random Forest) يعمل وجاهز!"}
 
-    app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
 
