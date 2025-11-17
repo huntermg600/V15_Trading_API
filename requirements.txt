@@ -1,6 +1,8 @@
-flask
+fastapi
+uvicorn
 gunicorn
-scikit-learn==1.4.2
-numpy==1.26.4
+numpy
+pandas
+scikit-learn
 joblib
 google-cloud-storage
